@@ -1,0 +1,34 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: blog_postgres
+    restart: always
+    environment:
+      POSTGRES_DB: blog_db
+      POSTGRES_USER: blog_usr
+      POSTGRES_PASSWORD: mypassword
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: blog_rabbitmq
+    restart: always
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    ports:
+      - "5672:5672"   # AMQP protocol port (used by Laravel)
+      - "15672:15672" # Web Management UI (used by YOU in your browser!)
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+
+    
+
+volumes:
+  pgdata:
+  rabbitmq_data:
