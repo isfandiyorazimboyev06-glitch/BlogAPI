@@ -9,4 +9,4 @@ Artisan::command('inspire', function () {
 })->purpose('Display an inspiring quote');
 
 // Automatically runs our command every single minute without overlapping
-Schedule::command('blog:publish-scheduled')->dailyAt("08:15");
+Schedule::command('blog:publish-scheduled')->everyMinute()->withoutOverlapping();

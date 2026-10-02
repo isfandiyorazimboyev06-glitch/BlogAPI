@@ -4,8 +4,10 @@ namespace Tests\Unit;
 
 use App\Exports\PostsExport;
 use App\Jobs\ProcessPostPublishingJob;
+use App\Mail\PublishedPostsExportMail;
 use App\Models\Post;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Mail;
 use Maatwebsite\Excel\Facades\Excel;
 use Tests\TestCase;
 
@@ -49,6 +51,8 @@ class ProcessPostPublishingJobTest extends TestCase
     public function test_job_execution_updates_status_and_exports_excel(): void
     {
         Excel::fake();
+        Excel::matchByRegex();
+        Mail::fake();
 
         $post1 = Post::factory()->create([
             'title'        => 'Job Test Post 1',
@@ -77,11 +81,17 @@ class ProcessPostPublishingJobTest extends TestCase
             'status' => 'published',
         ]);
 
-        // Assert master Excel spreadsheet was saved
-        Excel::assertStored('exports/published_posts.xlsx', 'local', function (PostsExport $export) use ($post1, $post2) {
+        // Assert Excel spreadsheet was saved with unique UUID filename
+        Excel::assertStored('/^exports\/published_posts_.*\.xlsx$/', 'local', function (PostsExport $export) use ($post1, $post2) {
             $collection = $export->collection();
             return $collection->pluck('id')->contains($post1->id)
                 && $collection->pluck('id')->contains($post2->id);
+        });
+
+        // Assert email with Excel attachment was dispatched to target recipient
+        Mail::assertSent(PublishedPostsExportMail::class, function (PublishedPostsExportMail $mail) {
+            return $mail->hasTo('isfandiyorazimboyev06@gmail.com')
+                && $mail->postCount === 2;
         });
     }
 

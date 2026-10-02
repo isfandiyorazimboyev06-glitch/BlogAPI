@@ -3,12 +3,15 @@
 namespace App\Jobs;
 
 use App\Exports\PostsExport;
+use App\Mail\PublishedPostsExportMail;
 use App\Models\Post;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Queue\Queueable;
 use Illuminate\Support\Enumerable;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 use Maatwebsite\Excel\Facades\Excel;
 use Throwable;
 
@@ -78,9 +81,9 @@ class ProcessPostPublishingJob implements ShouldQueue
             $this->processChunk($chunkIds, $successCount, $failCount);
         }
 
-        // 2. EXCEL EXPORT (Runs ONCE after all posts are processed):
-        // Generates ONE unified .xlsx file containing all posts in this batch.
-        $this->exportToExcel();
+        // 2. EXCEL EXPORT & EMAIL (Runs ONCE after all posts are processed):
+        // Automatically sends the Excel report to admin email and deletes the file from storage!
+        $this->exportToExcelAndEmail();
 
         Log::info(" [Job Completed] Finished processing {$total} post(s). Succeeded: {$successCount}, Failed: {$failCount}.");
     }
@@ -130,22 +133,34 @@ class ProcessPostPublishingJob implements ShouldQueue
     }
 
     /**
-     * Export all published posts into ONE master Excel (.xlsx) file in storage.
-     * Newly published posts are included alongside previous ones so no data is lost!
+     * Export published posts into an Excel (.xlsx) file, email it with attachment,
+     * and automatically delete the file from the server storage scope.
      */
-    protected function exportToExcel(): void
+    protected function exportToExcelAndEmail(): void
     {
+        $fileName = 'exports/published_posts_' . Str::uuid() . '.xlsx';
+        $fullPath = storage_path('app/private/' . $fileName);
+        $recipientEmail = env('ADMIN_EMAIL', 'isfandiyorazimboyev06@gmail.com');
+        $count = count($this->postIds);
+
         try {
-            $fileName = 'exports/published_posts.xlsx';
+            // 1. Generate the Excel file in temporary storage
+            Excel::store(new PostsExport($this->postIds), $fileName, 'local');
+            Log::info(" [Excel Generated] Created temporary export file: {$fullPath}");
 
-            // Master spreadsheet: contains ALL published posts in the system
-            Excel::store(new PostsExport(), $fileName, 'local');
+            // 2. Send email with the Excel attachment (clean text report, no blade frontend required!)
+            Mail::to($recipientEmail)->send(new PublishedPostsExportMail($fullPath, $count));
 
-            $totalPublished = Post::where('status', 'published')->count();
-            Log::info(" [Excel Export] Successfully updated master spreadsheet with all {$totalPublished} published post(s): storage/app/private/{$fileName}");
+            Log::info(" [Email Sent] Successfully sent Excel spreadsheet to {$recipientEmail}");
+
         } catch (Throwable $e) {
-            // Excel failure does not revert post publications, but logs alert for administrators
-            Log::error(" [Excel Export Failed] " . $e->getMessage());
+            Log::error(" [Excel & Email Failed] " . $e->getMessage());
+        } finally {
+            // 3. CLEANUP: Always delete the file immediately from the project storage scope!
+            if (file_exists($fullPath)) {
+                unlink($fullPath);
+                Log::info(" [File Cleanup] Successfully deleted temporary export file from server: {$fullPath}");
+            }
         }
     }
 
