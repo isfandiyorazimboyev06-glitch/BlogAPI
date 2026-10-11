@@ -7,6 +7,7 @@ use App\Interfaces\PostRepositoryInterface;
 use App\Jobs\ProcessPostPublishingJob;
 use App\Models\Post;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 
 
@@ -28,7 +29,13 @@ class PostRepository implements PostRepositoryInterface
      */
     public function getById(int $id): PostResource
     {
-        $post = Post::findOrFail($id);
+        $cachedJson = Cache::remember("post:{$id}", 300, function () use ($id) {
+            $post = Post::findOrFail($id);
+            return json_encode($post->getAttributes());
+        });
+
+        $attributes = json_decode($cachedJson, true);
+        $post = (new Post)->newFromBuilder($attributes);
 
         return new PostResource($post);
     }
@@ -71,6 +78,9 @@ class PostRepository implements PostRepositoryInterface
 
             $post->update($data);
 
+            // Invalidate cache so subsequent getById calls return updated data
+            Cache::forget("post:{$id}");
+
             // If an author updates a draft/scheduled post to published directly, dispatch the job!
             if ($oldStatus !== 'published' && $post->status === 'published') {
                 ProcessPostPublishingJob::dispatch($post);
@@ -87,6 +97,8 @@ class PostRepository implements PostRepositoryInterface
     {
         $post = Post::findOrFail($id);
 
+        // Invalidate cache so deleted post is no longer returned
+        Cache::forget("post:{$id}");
 
         return (bool) $post->delete();
     }

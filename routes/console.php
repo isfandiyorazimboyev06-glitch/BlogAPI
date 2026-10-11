@@ -1,4 +1,4 @@
-<?php
+=<?php
 
 use Illuminate\Foundation\Inspiring;
 use Illuminate\Support\Facades\Artisan;
@@ -9,4 +9,4 @@ Artisan::command('inspire', function () {
 })->purpose('Display an inspiring quote');
 
 // Automatically runs our command every single minute without overlapping
-Schedule::command('blog:publish-scheduled')->everyMinute()->withoutOverlapping();
+Schedule::command('blog:publish-scheduled')->everyMinute();

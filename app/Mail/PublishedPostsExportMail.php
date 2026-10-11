@@ -19,10 +19,8 @@ class PublishedPostsExportMail extends Mailable
      */
     public function __construct(
         public string $filePath,
-        public int $postCount = 0
-    ) {
-        //
-    }
+        public int $postCount
+    ) {}
 
     /**
      * Get the message envelope.
@@ -30,24 +28,26 @@ class PublishedPostsExportMail extends Mailable
     public function envelope(): Envelope
     {
         return new Envelope(
-            subject: "Published Blog Posts Report ({$this->postCount} post(s))",
+            subject: "Your Published Blog Posts Report ({$this->postCount} Posts)",
         );
     }
 
     /**
-     * Get the message content definition (clean raw text, no blade template required).
+     * Get the message content definition (No Blade file needed!).
      */
     public function content(): Content
     {
         return new Content(
-            htmlString: nl2br(e(
-                "Hello,\n\n"
-                . "The background job has successfully processed and published blog posts.\n"
-                . "Total posts in this batch: {$this->postCount}\n\n"
-                . "Author: isfandiyorazimboyev06-glitch\n"
-                . "System: BlogAPI\n\n"
-                . "Please find the attached Excel spreadsheet report."
-            ))
+            htmlString: "
+                <div style='font-family: Arial, sans-serif; line-height: 1.6; color: #333;'>
+                    <h2 style='color: #2c3e50;'>Hello Author,</h2>
+                    <p>Your blog posts have been successfully published by the background worker.</p>
+                    <p>Total posts in this report: <strong>{$this->postCount}</strong></p>
+                    <p>The detailed Excel spreadsheet has been attached to this email for your records.</p>
+                    <br>
+                    <p>Best regards,<br><strong>Blog API Publishing System</strong></p>
+                </div>
+            "
         );
     }
 
@@ -58,10 +58,6 @@ class PublishedPostsExportMail extends Mailable
      */
     public function attachments(): array
     {
-        if (! file_exists($this->filePath)) {
-            return [];
-        }
-
         return [
             Attachment::fromPath($this->filePath)
                 ->as('published_posts.xlsx')

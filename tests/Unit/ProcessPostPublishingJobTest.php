@@ -8,6 +8,7 @@ use App\Mail\PublishedPostsExportMail;
 use App\Models\Post;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Mail;
+use Illuminate\Support\Facades\Storage;
 use Maatwebsite\Excel\Facades\Excel;
 use Tests\TestCase;
 
@@ -46,12 +47,11 @@ class ProcessPostPublishingJobTest extends TestCase
     }
 
     /**
-     * Test executing the job updates post statuses and exports the Excel file.
+     * Test executing the job updates post statuses, exports Excel, and emails to author.
      */
     public function test_job_execution_updates_status_and_exports_excel(): void
     {
         Excel::fake();
-        Excel::matchByRegex();
         Mail::fake();
 
         $post1 = Post::factory()->create([
@@ -69,9 +69,10 @@ class ProcessPostPublishingJobTest extends TestCase
         ]);
 
         $job = new ProcessPostPublishingJob([$post1->id, $post2->id]);
+        $job->exportFileName = 'exports/published_posts.xlsx';
         $job->handle();
 
-        // Assert posts statuses were updated to published
+        // 1. Assert post statuses were updated in the database
         $this->assertDatabaseHas('posts', [
             'id'     => $post1->id,
             'status' => 'published',
@@ -81,18 +82,70 @@ class ProcessPostPublishingJobTest extends TestCase
             'status' => 'published',
         ]);
 
-        // Assert Excel spreadsheet was saved with unique UUID filename
-        Excel::assertStored('/^exports\/published_posts_.*\.xlsx$/', 'local', function (PostsExport $export) use ($post1, $post2) {
+        // 2. Assert Excel spreadsheet was generated with exact post IDs
+        Excel::assertStored('exports/published_posts.xlsx', 'local', function (PostsExport $export) use ($post1, $post2) {
             $collection = $export->collection();
             return $collection->pluck('id')->contains($post1->id)
                 && $collection->pluck('id')->contains($post2->id);
         });
 
-        // Assert email with Excel attachment was dispatched to target recipient
+        // 3. Assert email was dispatched to isfandiyorazimboyev06@gmail.com with the attachment
         Mail::assertSent(PublishedPostsExportMail::class, function (PublishedPostsExportMail $mail) {
             return $mail->hasTo('isfandiyorazimboyev06@gmail.com')
-                && $mail->postCount === 2;
+                && $mail->postCount === 2
+                && str_contains($mail->filePath, 'published_posts.xlsx');
         });
+    }
+
+    /**
+     * Test that PublishedPostsExportMail has valid envelope, htmlString content (no Blade), and attachment.
+     */
+    public function test_published_posts_export_mail_structure(): void
+    {
+        $dummyPath = storage_path('app/private/exports/dummy_test.xlsx');
+        $mailable = new PublishedPostsExportMail($dummyPath, 7);
+
+        // Envelope
+        $this->assertEquals('Your Published Blog Posts Report (7 Posts)', $mailable->envelope()->subject);
+
+        // Content (pure HTML string, no Blade view)
+        $content = $mailable->content();
+        $this->assertNull($content->view);
+        $this->assertStringContainsString('Hello Author', $content->htmlString);
+        $this->assertStringContainsString('7', $content->htmlString);
+
+        // Attachments
+        $attachments = $mailable->attachments();
+        $this->assertCount(1, $attachments);
+    }
+
+    /**
+     * Test job archives Excel file to cloud disk (DO Spaces / S3) when ARCHIVE_DISK is configured.
+     */
+    public function test_job_archives_to_cloud_storage_when_configured(): void
+    {
+        Storage::fake('do_spaces');
+        config(['filesystems.cloud_archive_disk' => 'do_spaces']);
+
+        // Create temporary dummy file to simulate generated Excel file
+        $tempPath = storage_path('app/private/exports/test_archive.xlsx');
+        if (! file_exists(dirname($tempPath))) {
+            mkdir(dirname($tempPath), 0755, true);
+        }
+        file_put_contents($tempPath, 'fake-excel-content');
+
+        $job = new ProcessPostPublishingJob([1]);
+        $reflection = new \ReflectionClass($job);
+        $method = $reflection->getMethod('archiveToCloud');
+        $method->invoke($job, $tempPath, 'exports/test_archive.xlsx');
+
+        Storage::disk('do_spaces')->assertExists('exports/test_archive.xlsx');
+
+        // Cleanup
+        if (file_exists($tempPath)) {
+            unlink($tempPath);
+        }
+        config(['filesystems.cloud_archive_disk' => null]);
     }
 
     /**
@@ -106,3 +159,4 @@ class ProcessPostPublishingJobTest extends TestCase
         $this->assertEmpty($job->postIds);
     }
 }
+

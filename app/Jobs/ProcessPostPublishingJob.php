@@ -11,7 +11,6 @@ use Illuminate\Support\Enumerable;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\Storage;
-use Illuminate\Support\Str;
 use Maatwebsite\Excel\Facades\Excel;
 use Throwable;
 
@@ -31,6 +30,11 @@ class ProcessPostPublishingJob implements ShouldQueue
     public array $postIds = [];
 
     /**
+     * Optional custom export file name (useful for testing or predictable naming).
+     */
+    public ?string $exportFileName = null;
+
+    /**
      * Create a new job instance.
      * Accepts:
      * - A single Post model: ProcessPostPublishingJob::dispatch($post)
@@ -47,9 +51,9 @@ class ProcessPostPublishingJob implements ShouldQueue
         } elseif (is_int($posts)) {
             $this->postIds = [$posts];
         } elseif ($posts instanceof Enumerable) {
-            $this->postIds = $posts->pluck('id')->map(fn ($id) => (int) $id)->all();
+            $this->postIds = $posts->pluck('id')->map(fn($id) => (int) $id)->all();
         } elseif (is_array($posts)) {
-            $this->postIds = array_map(fn ($p) => $p instanceof Post ? (int) $p->id : (int) $p, array_values($posts));
+            $this->postIds = array_map(fn($p) => $p instanceof Post ? (int) $p->id : (int) $p, array_values($posts));
         } else {
             $this->postIds = [];
         }
@@ -81,9 +85,9 @@ class ProcessPostPublishingJob implements ShouldQueue
             $this->processChunk($chunkIds, $successCount, $failCount);
         }
 
-        // 2. EXCEL EXPORT & EMAIL (Runs ONCE after all posts are processed):
-        // Automatically sends the Excel report to admin email and deletes the file from storage!
-        $this->exportToExcelAndEmail();
+        // 2. EXCEL EXPORT & EMAIL:
+        // Generates the Excel file, emails it to the author, and immediately deletes it!
+        $this->exportEmailAndClean($total);
 
         Log::info(" [Job Completed] Finished processing {$total} post(s). Succeeded: {$successCount}, Failed: {$failCount}.");
     }
@@ -124,7 +128,6 @@ class ProcessPostPublishingJob implements ShouldQueue
 
             Log::info("  ✓ Processed & Published Post #{$post->id}: '{$post->title}' ({$minutesToRead} min read).");
             $successCount++;
-
         } catch (Throwable $e) {
             // Isolate failure: corrupt data on 1 post never crashes the rest of the batch!
             Log::error("  ✗ Error processing Post #{$post->id}: " . $e->getMessage());
@@ -133,34 +136,60 @@ class ProcessPostPublishingJob implements ShouldQueue
     }
 
     /**
-     * Export published posts into an Excel (.xlsx) file, email it with attachment,
-     * and automatically delete the file from the server storage scope.
+     * Export posts into an Excel file, email it to the author, and immediately delete the file.
+     * Prevents any leftover disk clutter in the project scope.
      */
-    protected function exportToExcelAndEmail(): void
+    protected function exportEmailAndClean(int $postCount): void
     {
-        $fileName = 'exports/published_posts_' . Str::uuid() . '.xlsx';
-        $fullPath = storage_path('app/private/' . $fileName);
-        $recipientEmail = env('ADMIN_EMAIL', 'isfandiyorazimboyev06@gmail.com');
-        $count = count($this->postIds);
-
         try {
-            // 1. Generate the Excel file in temporary storage
+            // 1. Generate temporary Excel file for this batch
+            $fileName = $this->exportFileName ?? ('exports/published_posts_' . uniqid() . '.xlsx');
             Excel::store(new PostsExport($this->postIds), $fileName, 'local');
-            Log::info(" [Excel Generated] Created temporary export file: {$fullPath}");
+            $fullPath = storage_path('app/private/' . $fileName);
 
-            // 2. Send email with the Excel attachment (clean text report, no blade frontend required!)
-            Mail::to($recipientEmail)->send(new PublishedPostsExportMail($fullPath, $count));
+            // 2. Send email with the Excel attachment to the author (NO Blade view required!)
+            $recipientEmail = env('ADMIN_EMAIL', 'isfandiyorazimboyev06@gmail.com');
+            Mail::to($recipientEmail)->send(new PublishedPostsExportMail($fullPath, $postCount));
+            Log::info(" [Email Sent] Successfully sent Excel report with {$postCount} post(s) to {$recipientEmail}.");
 
-            Log::info(" [Email Sent] Successfully sent Excel spreadsheet to {$recipientEmail}");
+            // 3. ARCHIVE TO CLOUD (DigitalOcean Spaces / S3) IF CONFIGURED:
+            $this->archiveToCloud($fullPath, $fileName);
 
-        } catch (Throwable $e) {
-            Log::error(" [Excel & Email Failed] " . $e->getMessage());
-        } finally {
-            // 3. CLEANUP: Always delete the file immediately from the project storage scope!
+            // 4. IMMEDIATELY DELETE the file from local project storage!
             if (file_exists($fullPath)) {
                 unlink($fullPath);
-                Log::info(" [File Cleanup] Successfully deleted temporary export file from server: {$fullPath}");
+                Log::info(" [File Cleanup] Successfully deleted temporary Excel file from local storage: {$fileName}");
             }
+        } catch (Throwable $e) {
+            // Log alert without breaking post publishing
+            Log::error(" [Excel & Email Failed] " . $e->getMessage());
+        }
+    }
+
+    /**
+     * Archive the Excel report to cloud object storage (DigitalOcean Spaces or AWS S3) if configured.
+     */
+    protected function archiveToCloud(string $fullPath, string $fileName): void
+    {
+        $archiveDisk = config('filesystems.cloud_archive_disk', env('ARCHIVE_DISK'));
+
+        if (! $archiveDisk) {
+            return;
+        }
+
+        try {
+            if (file_exists($fullPath)) {
+                $cloudPath = 'exports/' . basename($fileName);
+                $stream = fopen($fullPath, 'r');
+                Storage::disk($archiveDisk)->put($cloudPath, $stream, 'private');
+                if (is_resource($stream)) {
+                    fclose($stream);
+                }
+                Log::info(" [Cloud Archive] Successfully uploaded Excel report to [{$archiveDisk}]: {$cloudPath}");
+            }
+        } catch (Throwable $e) {
+            // Cloud archiving failure should never crash the main publishing flow
+            Log::warning(" [Cloud Archive Failed] Could not upload to [{$archiveDisk}]: " . $e->getMessage());
         }
     }
 
@@ -172,4 +201,3 @@ class ProcessPostPublishingJob implements ShouldQueue
         Log::error(" [Job Failed] Batch processing failed permanently. Reason: " . $exception?->getMessage());
     }
 }
-
